@@ -41,6 +41,8 @@ function BoxParser(/*config*/) {
     let logger,
         instance;
     let context = this.context;
+    let verifiedManifests = [];
+    let verifiedAuthenticators = [];
 
     function setup() {
         logger = Debug(context).getInstance().getLogger(instance);
@@ -252,12 +254,245 @@ function BoxParser(/*config*/) {
         return initRange;
     }
 
+    function ampVerifyManifest(data) {
+        const isoFile = parse(data);
+
+        if (!isoFile) {
+            return;
+        }
+
+        const emsgs = isoFile.getBoxes('emsg');
+
+        if (!emsgs) {
+            logger.fatal('ampVerifyManifest error: no emsgs');
+            return;
+        }
+
+        let emsg = null;
+        for (let i = 0, ln = emsgs.length; i < ln; i++) {
+            if (emsgs[i].scheme_id_uri === 'urn:mpeg:amp:manifest:emsg') {
+                emsg = emsgs[i];
+            }
+        }
+
+        if (!emsg) {
+            logger.fatal('ampVerifyManifest error: no emsg with AMP manifest urn');
+            return;
+        }
+
+        let message_data = emsg.message_data.buffer.slice(emsg.message_data.byteOffset, emsg.message_data.byteOffset + emsg.message_data.byteLength);
+        let msgdata = new Uint8Array(message_data);
+
+        let verified = false;
+        let jsonStr = JSON.stringify(msgdata);
+        for (let iVerified = 0; iVerified < verifiedManifests.length && !verified; iVerified++) {
+            let jsonStrNext = JSON.stringify(verifiedManifests[iVerified]);
+            if (jsonStr.localeCompare(jsonStrNext) === 0) {
+                verified = true;
+            }
+        }
+
+        if (verified) {
+            logger.fatal('ampVerifyManifest: This manifest was already verified.');
+            return;
+        }
+
+        var CBOR = require('cbor-js');
+        var manifest = CBOR.decode(message_data);
+
+        // Verifying a Manifest Algorithm Step 1. Fail unless the following versions are all === 1
+        if (manifest.version !== 1 ||
+            manifest.coreManifest.version !== 1 ||
+            manifest.facsimileInfo.version !== 1 ||
+            manifest.publisherEvidence.version !== 1) {
+            logger.fatal('ampVerifyManifest error: invalid version');
+            return;
+        }
+
+        // Verifying a Manifest Algorithm Step 2. Fail unless DigestAlgorithm is set to "SHA-256"
+        if (manifest.coreManifest.digestAlgorithm !== 'SHA-256') {
+            logger.fatal('ampVerifyManifest error: invalid digestAlgorithm: ' + manifest.coreManifest.digestAlgorithm);
+            return;
+        }
+
+        let authenticators = [];
+        for (let iRecord = 0; iRecord < manifest.facsimileInfo.records.length; iRecord++) {
+
+            // Verifying a Manifest Algorithm Step 3. Fail unless a Records[*] has a ChunkData with ChunkingScheme === 2 (Iso Box Authenticator)
+            let authenticator = null;
+            for (let iChunkData = 0; iChunkData < manifest.facsimileInfo.records[iRecord].facsimile.chunkData.length && authenticator === null; iChunkData++) {
+                if (manifest.facsimileInfo.records[iRecord].facsimile.chunkData[iChunkData].chunkingScheme === 2) {
+                    authenticator = manifest.facsimileInfo.records[iRecord].facsimile.chunkData[iChunkData];
+                }
+            }
+            if (authenticator === null) {
+                logger.fatal('ampVerifyManifest error: no ISO Box Authenticator found for record ' + iRecord);
+                return;
+            }
+            authenticators.push(authenticator);
+
+            // Note: No step 4.  (Previous versions had a step 4.)
+
+            // Verifying a Manifest Algorithm Step 5. Fail unless Records[*].IndexIntoFacsimileDescriptorDigests < FacsimileDescriptorDigests.cItems
+            if (manifest.facsimileInfo.records[iRecord].index >= manifest.coreManifest.facsimileDescriptorCborDigests.length) {
+                logger.fatal('ampVerifyManifest error: index out of bounds in record ' + iRecord);
+                return;
+            }
+
+            // Verifying a Manifest Algorithm Step 6. Fail unless SHA256( cbor-of( Records[*].FacsimileDescriptor ) )
+            //                                                === FacsimileDescriptorDigests[ Records[*].IndexIntoFacsimileDescriptorDigests ]
+            let manifestFacsimileDigest = manifest.coreManifest.facsimileDescriptorCborDigests[manifest.facsimileInfo.records[iRecord].index];
+            let cborFacsimile = new Uint8Array(CBOR.encode(manifest.facsimileInfo.records[iRecord].facsimile));
+
+            // TODO: computedFacsimileDigest should be SHA256(cborFacsimile)
+            let computedFacsimileDigest = cborFacsimile;
+
+            if (manifestFacsimileDigest.length !== computedFacsimileDigest.length) {
+                logger.fatal('ampVerifyManifest error: manifestFacsimileDigest.length !== computedFacsimileDigest.length ' + manifestFacsimileDigest.length + ' vs ' + computedFacsimileDigest.length);
+                //TODO: return;
+            }
+            if (manifestFacsimileDigest !== computedFacsimileDigest) {
+                logger.fatal('ampVerifyManifest error: incorrect SHA256( cbor-of( Records[*].FacsimileDescriptor ) ) for record ' + iRecord);
+                //TODO: return;
+            }
+        }
+
+        // Verifying a Manifest Algorithm Step 7. Fail unless CoseSignatureToken is well-formed
+        var coseData = manifest.publisherEvidence.coseSignatureToken;
+        if (coseData.length !== 107 ||
+            coseData[0] !== 0xD2 ||
+            coseData[2] !== 0x43 ||
+            coseData[3] !== 0xA1 ||
+            coseData[4] !== 0x01 ||
+            coseData[5] !== 0x26 ||
+            coseData[6] !== 0xA0 ||
+            coseData[7] !== 0x58 ||
+            coseData[8] !== 0x20 ||
+            coseData[41] !== 0x58 ||
+            coseData[42] !== 0x40) {
+            logger.fatal('ampVerifyManifest error: cose signature token is malformed: ' + coseData);
+            return;
+        }
+
+        // Verifying a Manifest Algorithm Step 8. Fail unless SHA256( cbor-of( CoreManifest ) )
+        //                                                === the value from CoseSignatureToken at the appropriate offset
+        let manifestCoreDigest = coseData.slice(9, 41);
+        let cborCore = new Uint8Array(CBOR.encode(manifest.coreManifest));
+
+        // TODO: computedCoreDigest should be SHA256(cborCore)
+        let computedCoreDigest = cborCore;
+
+        if (manifestCoreDigest.length !== computedCoreDigest.length) {
+            logger.fatal('ampVerifyManifest error: manifestCoreDigest.length !== computedCoreDigest.length ' + manifestCoreDigest.length + ' vs ' + computedCoreDigest.length);
+            //TODO: return;
+        }
+        if (manifestCoreDigest !== computedCoreDigest) {
+            logger.fatal('ampVerifyManifest error: incorrect SHA256( cbor-of( CoreManifest ) )');
+            //TODO: return;
+        }
+
+        // Verifying a Manifest Algorithm Step 9. Fail unless the following succeeds
+        //  ECDSA-P256-SHA256-Verify( [To Sign, see comments in drmprovenancemanifest.h], pubkey-from( PemEncodedCertificates[0] ) )
+        let manifestCoseEccSignature = coseData.slice(43);
+        logger.fatal('TODO: this log only exists for compilation success: manifestCoseEccSignature  ' + manifestCoseEccSignature);
+
+        let coseEccToSignHeader = new Uint8Array([0x84, 0x6A, 0x53, 0x69, 0x67, 0x6E, 0x61, 0x74, 0x75, 0x72, 0x65, 0x31, 0x43, 0xA1, 0x01, 0x26, 0x40, 0x58, 0x20]);
+        let coseEccToSign = new Uint8Array(coseEccToSignHeader.length + manifestCoreDigest.length);
+        coseEccToSign.set(coseEccToSignHeader);
+        coseEccToSign.set(manifestCoreDigest, coseEccToSignHeader.length);
+
+        let leafCert = manifest.publisherEvidence.pemEncodedCertificates[0];
+
+        //TODO: Parse the public key from leafCert
+        let leafPubkey = leafCert;
+        logger.fatal('TODO: this log only exists for compilation success: leafPubkey: ' + leafPubkey);
+
+        //TODO: ECDSA-P256-SHA256-Verify( coseEccToSign, leafPubkey, manifestCoseEccSignature )
+        logger.fatal('TODO: ampVerifyManifest error: incorrect ECC signature on manifest');
+
+        // Verifying a Manifest Algorithm Step 10. Fail unless the certificate chain properly chains from leaf
+        //                                         ( PemEncodedCertificates[0] ) to root via some chain path
+        //                                         through the manifest-provided and input-provided certificates.
+
+        //TODO: Hard-code the root cert to verify against
+        //TODO: Verify cert chain manifest.publisherEvidence.pemEncodedCertificates[*]
+        logger.fatal('TODO: ampVerifyManifest error: valid certificate chain could not be established');
+
+        //logger.fatal('manifest is ' + JSON.stringify(manifest));
+        verifiedManifests.push(msgdata);
+
+        for (let i = 0; i < authenticators.length; i++) {
+            verifiedAuthenticators.push(authenticators[i]);
+        }
+
+        return;
+    }
+
+    function findAmpHashData(data) {
+        const isoFile = parse(data);
+
+        if (!isoFile) {
+            return;
+        }
+
+        const emsgs = isoFile.getBoxes('emsg');
+
+        if (!emsgs) {
+            logger.fatal('findAmpHashData error: no emsgs');
+            return;
+        }
+
+        let emsg = null;
+        for (let i = 0, ln = emsgs.length; i < ln; i++) {
+            if (emsgs[i].scheme_id_uri === 'urn:mpeg:amp:chunk:emsg') {
+                emsg = emsgs[i];
+            }
+        }
+
+        if (!emsg) {
+            logger.fatal('findAmpHashData error: no emsg with AMP chunk urn');
+            return;
+        }
+
+        let message_data = emsg.message_data.buffer.slice(emsg.message_data.byteOffset, emsg.message_data.byteOffset + emsg.message_data.byteLength);
+        let dataView = new DataView(message_data);
+        let moov_id = dataView.getUint32(0);
+        let track_id = dataView.getUint32(4);
+        let sequence_number = dataView.getUint32(8);
+        let hash_location = dataView.getUint16(12);
+        let hash_size = dataView.getUint8(14);
+        let hash_count = dataView.getUint8(15);
+
+        logger.fatal('findAmpHashData - hash found' +
+            ' ' + moov_id +
+            ' ' + track_id +
+            ' ' + sequence_number +
+            ' ' + hash_location +
+            ' ' + hash_size +
+            ' ' + hash_count
+        );
+
+        let hashes = new Uint8Array(message_data.slice(16));
+        if (hash_size !== 32) {
+            logger.fatal('findAmpHashData error: hash size is not 32');
+            return;
+        }
+        if (hashes.length !== hash_count * hash_size) {
+            logger.fatal('findAmpHashData error: chunk data has the wrong size ' + hashes.length + ' vs ' + (hash_count * hash_size));
+            return;
+        }
+
+        return;
+    }
+
     instance = {
         parse: parse,
         findLastTopIsoBoxCompleted: findLastTopIsoBoxCompleted,
         getMediaTimescaleFromMoov: getMediaTimescaleFromMoov,
         getSamplesInfo: getSamplesInfo,
-        findInitRange: findInitRange
+        findInitRange: findInitRange,
+        ampVerifyManifest: ampVerifyManifest,
+        findAmpHashData: findAmpHashData
     };
 
     setup();

@@ -63,6 +63,7 @@
     "html-entities": "^1.2.1",
     "localforage": "^1.7.1",
     "request": "^2.87.0",
+    "cbor-js": "^0.1.0",
     "request-promise": "^4.2.2"
   },
   "repository": {

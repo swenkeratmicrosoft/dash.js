@@ -189,6 +189,10 @@ function BufferController(config) {
     function onInitFragmentLoaded(e) {
         if (e.chunk.streamId !== streamInfo.id || e.chunk.mediaInfo.type !== type) return;
 
+        if (e.boxParser) {
+            e.boxParser.ampVerifyManifest(e.chunk.bytes);
+        }
+
         logger.info('Init fragment finished loading saving to', type + '\'s init cache');
         initCache.save(e.chunk);
         logger.debug('Append Init fragment', type, ' with representationId:', e.chunk.representationId, ' and quality:', e.chunk.quality,  ', data size:', e.chunk.bytes.byteLength);
@@ -213,6 +217,10 @@ function BufferController(config) {
     function onMediaFragmentLoaded(e) {
         const chunk = e.chunk;
         if (chunk.streamId !== streamInfo.id || chunk.mediaInfo.type != type) return;
+
+        if (e.boxParser) {
+            e.boxParser.findAmpHashData(e.chunk.bytes);
+        }
 
         if (replacingBuffer) {
             mediaChunk = chunk;
