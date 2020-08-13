@@ -96,6 +96,7 @@ class IsoBox {
                 this.flags = boxData.flags;
                 break;
             case 'trun':
+                this.version = boxData.version;
                 this.sample_count = boxData.sample_count;
                 this.first_sample_flags = boxData.first_sample_flags;
                 this.data_offset = boxData.data_offset;
@@ -112,6 +113,13 @@ class IsoBox {
                         this.samples.push(sample);
                     }
                 }
+                break;
+            case 'trex':
+                this.default_sample_duration = boxData.default_sample_duration;
+                this.default_sample_duration = boxData.default_sample_size;
+                break;
+            case 'mdat':
+                this.data = boxData.data;
                 break;
         }
 

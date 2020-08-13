@@ -219,7 +219,7 @@ function BufferController(config) {
         if (chunk.streamId !== streamInfo.id || chunk.mediaInfo.type != type) return;
 
         if (e.boxParser) {
-            e.boxParser.findAmpHashData(e.chunk.bytes);
+            e.boxParser.verifyAmpHash(e.chunk.bytes);
         }
 
         if (replacingBuffer) {

@@ -43,6 +43,7 @@ function BoxParser(/*config*/) {
     let context = this.context;
     let verifiedManifests = [];
     let verifiedAuthenticators = [];
+    let done = false;
 
     function setup() {
         logger = Debug(context).getInstance().getLogger(instance);
@@ -254,6 +255,39 @@ function BoxParser(/*config*/) {
         return initRange;
     }
 
+    function compare(arr1, arr2) {
+        if (arr1.length !== arr2.length) {
+            return false;
+        }
+        for (let ib = 0; ib < arr1.length; ib++) {
+            if (arr1[ib] !== arr2[ib]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function ShaPromise(dataToHash, expectedHash) {
+        return new Promise(function (resolve, reject) {
+            window.crypto.subtle.digest('SHA-256', dataToHash).then(function (computedCoreDigestBuf) {
+                resolve({ hash: new Uint8Array(computedCoreDigestBuf), expectedHash: expectedHash });
+            }).catch (function (e) {
+                reject(e);
+            });
+        });
+    }
+
+    function toHexString(byteArray) {
+        if (byteArray === null) {
+            return 'null';
+        }
+        let s = '';
+        byteArray.forEach(function (byte) {
+            s += '0x' + ('0' + (byte & 0xFF).toString(16)).slice(-2) + ', ';
+        });
+        return s;
+    }
+
     function ampVerifyManifest(data) {
         const isoFile = parse(data);
 
@@ -297,8 +331,8 @@ function BoxParser(/*config*/) {
             return;
         }
 
-        var CBOR = require('cbor-js');
-        var manifest = CBOR.decode(message_data);
+        let CBOR = require('cbor-js');
+        let manifest = CBOR.decode(message_data);
 
         // Verifying a Manifest Algorithm Step 1. Fail unless the following versions are all === 1
         if (manifest.version !== 1 ||
@@ -315,6 +349,7 @@ function BoxParser(/*config*/) {
             return;
         }
 
+        let promises = [];
         let authenticators = [];
         for (let iRecord = 0; iRecord < manifest.facsimileInfo.records.length; iRecord++) {
 
@@ -329,6 +364,10 @@ function BoxParser(/*config*/) {
                 logger.fatal('ampVerifyManifest error: no ISO Box Authenticator found for record ' + iRecord);
                 return;
             }
+            if (authenticator.numChunks === 0) {
+                logger.fatal('ampVerifyManifest error: Invalid authenticator (zero chunk count) in record ' + iRecord);
+                return;
+            }
             authenticators.push(authenticator);
 
             // Note: No step 4.  (Previous versions had a step 4.)
@@ -341,104 +380,330 @@ function BoxParser(/*config*/) {
 
             // Verifying a Manifest Algorithm Step 6. Fail unless SHA256( cbor-of( Records[*].FacsimileDescriptor ) )
             //                                                === FacsimileDescriptorDigests[ Records[*].IndexIntoFacsimileDescriptorDigests ]
+
+            // Because WebCrypto methods are async, defer verification until we can do all at once
             let manifestFacsimileDigest = manifest.coreManifest.facsimileDescriptorCborDigests[manifest.facsimileInfo.records[iRecord].index];
             let cborFacsimile = new Uint8Array(CBOR.encode(manifest.facsimileInfo.records[iRecord].facsimile));
 
-            // TODO: computedFacsimileDigest should be SHA256(cborFacsimile)
-            let computedFacsimileDigest = cborFacsimile;
-
-            if (manifestFacsimileDigest.length !== computedFacsimileDigest.length) {
-                logger.fatal('ampVerifyManifest error: manifestFacsimileDigest.length !== computedFacsimileDigest.length ' + manifestFacsimileDigest.length + ' vs ' + computedFacsimileDigest.length);
-                //TODO: return;
-            }
-            if (manifestFacsimileDigest !== computedFacsimileDigest) {
-                logger.fatal('ampVerifyManifest error: incorrect SHA256( cbor-of( Records[*].FacsimileDescriptor ) ) for record ' + iRecord);
-                //TODO: return;
-            }
+            promises.push(ShaPromise(cborFacsimile, manifestFacsimileDigest));
         }
 
-        // Verifying a Manifest Algorithm Step 7. Fail unless CoseSignatureToken is well-formed
-        var coseData = manifest.publisherEvidence.coseSignatureToken;
-        if (coseData.length !== 107 ||
-            coseData[0] !== 0xD2 ||
-            coseData[2] !== 0x43 ||
-            coseData[3] !== 0xA1 ||
-            coseData[4] !== 0x01 ||
-            coseData[5] !== 0x26 ||
-            coseData[6] !== 0xA0 ||
-            coseData[7] !== 0x58 ||
-            coseData[8] !== 0x20 ||
-            coseData[41] !== 0x58 ||
-            coseData[42] !== 0x40) {
-            logger.fatal('ampVerifyManifest error: cose signature token is malformed: ' + coseData);
+        Promise.all(promises).then(function (shaPromiseResults) {
+
+            for (let iSha = 0; iSha < shaPromiseResults.length; iSha++) {
+                let shaPromiseResult = shaPromiseResults[iSha];
+                let hash = shaPromiseResult.hash;
+                let expectedHash = shaPromiseResult.expectedHash;
+                if (!compare(hash, expectedHash)) {
+                    logger.fatal('ampVerifyManifest error: incorrect SHA256( cbor-of( Records[*].FacsimileDescriptor ) ) for record ' + iSha);
+                }
+            }
+
+            // Verifying a Manifest Algorithm Step 7. Fail unless CoseSignatureToken is well-formed
+            let coseData = manifest.publisherEvidence.coseSignatureToken;
+            if (coseData.length !== 107 ||
+                coseData[0] !== 0xD2 ||
+                coseData[2] !== 0x43 ||
+                coseData[3] !== 0xA1 ||
+                coseData[4] !== 0x01 ||
+                coseData[5] !== 0x26 ||
+                coseData[6] !== 0xA0 ||
+                coseData[7] !== 0x58 ||
+                coseData[8] !== 0x20 ||
+                coseData[41] !== 0x58 ||
+                coseData[42] !== 0x40) {
+                logger.fatal('ampVerifyManifest error: cose signature token is malformed: ' + coseData);
+                return;
+            }
+
+            // Verifying a Manifest Algorithm Step 8. Fail unless SHA256( cbor-of( CoreManifest ) )
+            //                                                === the value from CoseSignatureToken at the appropriate offset
+            let manifestCoreDigest = coseData.slice(9, 41);
+            let cborCoreData = CBOR.encode(manifest.coreManifest);
+
+            let crypto = window.crypto.subtle;
+
+            crypto.digest('SHA-256', cborCoreData).then(function (computedCoreDigestBuf) {
+
+                let computedCoreDigest = new Uint8Array(computedCoreDigestBuf);
+
+                if (!compare(manifestCoreDigest, computedCoreDigest)) {
+                    logger.fatal('ampVerifyManifest error: manifest hash !== computed SHA256( cbor-of( CoreManifest ) ) where first byte of each: ' + manifestCoreDigest[0] + ' vs ' + computedCoreDigest[0]);
+                    return;
+                }
+
+                // Verifying a Manifest Algorithm Step 9. Fail unless the following succeeds
+                //  ECDSA-P256-SHA256-Verify( [To Sign, see comments in drmprovenancemanifest.h], pubkey-from( PemEncodedCertificates[0] ) )
+                let manifestCoseEccSignature = coseData.slice(43);
+                logger.fatal('TODO: this log only exists for compilation success: manifestCoseEccSignature  ' + manifestCoseEccSignature);
+
+                let coseEccToSignHeader = new Uint8Array([0x84, 0x6A, 0x53, 0x69, 0x67, 0x6E, 0x61, 0x74, 0x75, 0x72, 0x65, 0x31, 0x43, 0xA1, 0x01, 0x26, 0x40, 0x58, 0x20]);
+                let coseEccToSign = new Uint8Array(coseEccToSignHeader.length + manifestCoreDigest.length);
+                coseEccToSign.set(coseEccToSignHeader);
+                coseEccToSign.set(manifestCoreDigest, coseEccToSignHeader.length);
+
+                let leafCert = manifest.publisherEvidence.pemEncodedCertificates[0];
+
+                //TODO: Parse the public key from leafCert
+                let leafPubkey = leafCert;
+                logger.fatal('TODO: this log only exists for compilation success: leafPubkey: ' + leafPubkey);
+
+                //TODO: ECDSA-P256-SHA256-Verify( coseEccToSign, leafPubkey, manifestCoseEccSignature )
+                logger.fatal('TODO: ampVerifyManifest error: incorrect ECC signature on manifest');
+
+                // Verifying a Manifest Algorithm Step 10. Fail unless the certificate chain properly chains from leaf
+                //                                         ( PemEncodedCertificates[0] ) to root via some chain path
+                //                                         through the manifest-provided and input-provided certificates.
+
+                //TODO: Hard-code the root cert to verify against
+                //TODO: Verify cert chain manifest.publisherEvidence.pemEncodedCertificates[*]
+                logger.fatal('TODO: ampVerifyManifest error: valid certificate chain could not be established');
+
+                logger.fatal('manifest is ' + JSON.stringify(manifest));
+                verifiedManifests.push(msgdata);
+
+                let trexBox = isoFile.getBox('trex');
+                let mdhdBox = isoFile.getBox('mdhd');
+                let mvhdBox = isoFile.getBox('mvhd');
+                for (let i = 0; i < authenticators.length; i++) {
+                    authenticators[i].trexBox = trexBox;
+                    authenticators[i].mdhdBox = mdhdBox;
+                    authenticators[i].mvhdBox = mvhdBox;
+                    verifiedAuthenticators.push(authenticators[i]);
+                }
+            }).catch(function (e) {
+                logger.fatal('ampVerifyManifest error: unable to SHA-256 with error ' + e);
+                return;
+            });
+        }).catch(function (e) {
+            logger.fatal('ampVerifyManifest error: unable to SHA-256 with error ' + e);
             return;
-        }
-
-        // Verifying a Manifest Algorithm Step 8. Fail unless SHA256( cbor-of( CoreManifest ) )
-        //                                                === the value from CoseSignatureToken at the appropriate offset
-        let manifestCoreDigest = coseData.slice(9, 41);
-        let cborCore = new Uint8Array(CBOR.encode(manifest.coreManifest));
-
-        // TODO: computedCoreDigest should be SHA256(cborCore)
-        let computedCoreDigest = cborCore;
-
-        if (manifestCoreDigest.length !== computedCoreDigest.length) {
-            logger.fatal('ampVerifyManifest error: manifestCoreDigest.length !== computedCoreDigest.length ' + manifestCoreDigest.length + ' vs ' + computedCoreDigest.length);
-            //TODO: return;
-        }
-        if (manifestCoreDigest !== computedCoreDigest) {
-            logger.fatal('ampVerifyManifest error: incorrect SHA256( cbor-of( CoreManifest ) )');
-            //TODO: return;
-        }
-
-        // Verifying a Manifest Algorithm Step 9. Fail unless the following succeeds
-        //  ECDSA-P256-SHA256-Verify( [To Sign, see comments in drmprovenancemanifest.h], pubkey-from( PemEncodedCertificates[0] ) )
-        let manifestCoseEccSignature = coseData.slice(43);
-        logger.fatal('TODO: this log only exists for compilation success: manifestCoseEccSignature  ' + manifestCoseEccSignature);
-
-        let coseEccToSignHeader = new Uint8Array([0x84, 0x6A, 0x53, 0x69, 0x67, 0x6E, 0x61, 0x74, 0x75, 0x72, 0x65, 0x31, 0x43, 0xA1, 0x01, 0x26, 0x40, 0x58, 0x20]);
-        let coseEccToSign = new Uint8Array(coseEccToSignHeader.length + manifestCoreDigest.length);
-        coseEccToSign.set(coseEccToSignHeader);
-        coseEccToSign.set(manifestCoreDigest, coseEccToSignHeader.length);
-
-        let leafCert = manifest.publisherEvidence.pemEncodedCertificates[0];
-
-        //TODO: Parse the public key from leafCert
-        let leafPubkey = leafCert;
-        logger.fatal('TODO: this log only exists for compilation success: leafPubkey: ' + leafPubkey);
-
-        //TODO: ECDSA-P256-SHA256-Verify( coseEccToSign, leafPubkey, manifestCoseEccSignature )
-        logger.fatal('TODO: ampVerifyManifest error: incorrect ECC signature on manifest');
-
-        // Verifying a Manifest Algorithm Step 10. Fail unless the certificate chain properly chains from leaf
-        //                                         ( PemEncodedCertificates[0] ) to root via some chain path
-        //                                         through the manifest-provided and input-provided certificates.
-
-        //TODO: Hard-code the root cert to verify against
-        //TODO: Verify cert chain manifest.publisherEvidence.pemEncodedCertificates[*]
-        logger.fatal('TODO: ampVerifyManifest error: valid certificate chain could not be established');
-
-        //logger.fatal('manifest is ' + JSON.stringify(manifest));
-        verifiedManifests.push(msgdata);
-
-        for (let i = 0; i < authenticators.length; i++) {
-            verifiedAuthenticators.push(authenticators[i]);
-        }
-
-        return;
+        });
     }
 
-    function findAmpHashData(data) {
+    function appendDwordAsBE(arr, dwordToPush) {
+        let result = new Uint8Array(arr.length + 4);
+        result.set(arr);
+
+        result[arr.length + 0] = (dwordToPush & 0xFF000000) >> 24;
+        result[arr.length + 1] = (dwordToPush & 0x00FF0000) >> 16;
+        result[arr.length + 2] = (dwordToPush & 0x0000FF00) >> 8;
+        result[arr.length + 3] = (dwordToPush & 0x000000FF) >> 0;
+        return result;
+    }
+
+    function appendArray(arr, arrToPush) {
+        let result = new Uint8Array(arr.length + arrToPush.length);
+        result.set(arr);
+        result.set(arrToPush, arr.length);
+        return result;
+    }
+
+    function computeDepth(nodes) {
+        let depth = 0;
+        while ((1 << depth) < nodes) {
+            depth++;
+        }
+        return depth + 1;
+    }
+
+    function computeRowStartIdxFromDepthOfRow(rowDepth) {
+        return (1 << (rowDepth - 1)) - 1;
+    }
+
+    function computePeerIdx(idx) {
+        if ((idx & 1) !== 0) {
+            return idx + 1;
+        }
+        else {
+            return idx - 1;
+        }
+    }
+
+    function computeHashCount(treeDepth) {
+        return (1 << treeDepth) - 1;
+    }
+
+    function computeLeftChildIdx(idxNode) {
+        return (idxNode << 1) + 1;
+    }
+
+    function doesNodeExist(cChunks, treeDepth, idxNode) {
+        let cMaxHashes = computeHashCount(treeDepth);
+        let idxMin = computeRowStartIdxFromDepthOfRow(treeDepth);
+        while (idxNode < idxMin) {
+            idxNode = computeLeftChildIdx(idxNode);
+        }
+        return (idxNode < cMaxHashes) && ((idxNode - idxMin) < cChunks);
+    }
+
+    function computeParentIdx(idxNode) {
+        return (idxNode - 1) >> 1;
+    }
+
+    function foldHash(left, right, fibHash) {
+        if (right !== null) {
+            let toHash = new Uint8Array(64);
+            toHash.set(left);
+            toHash.set(right, left.length);
+            logger.fatal('Folded a hash, both left and right');
+            return ShaPromise(toHash, fibHash);
+        } else {
+            return new Promise(function (resolve, reject) {
+                if (left !== null) {
+                    logger.fatal('Folded a hash, left only');
+                    resolve({ hash: left, expectedHash: fibHash});
+                } else {
+                    reject(new Error('left hash is null'));
+                }
+            });
+        }
+    }
+
+    function foldHashes(folds, fibHash) {
+        logFolds(folds);
+        if (folds.length === 1) {
+            logger.fatal('Finished with foldHashes');
+            return foldHash(folds[0].left, folds[0].right, fibHash);
+        } else {
+            return new Promise(function (resolve, reject) {
+                foldHash(folds[0].left, folds[0].right, fibHash).then(function (nextHash) {
+
+                    folds = folds.slice(1);
+
+                    if (folds[0].left === null) {
+                        folds[0].left = nextHash.hash;
+                    } else {
+                        if (folds[0].right !== null) {
+                            reject(new Error('unexpected hash present in foldHashes'));
+                        }
+                        folds[0].right = nextHash.hash;
+                    }
+
+                    let result = foldHashes(folds, fibHash);
+                    logger.fatal('Recursed out of foldHashes');
+                    return result;
+
+                }).catch(function (e) {
+
+                    return new Promise(function (resolve, reject) {
+                        if (e !== null) {
+                            reject(e);
+                        } else {
+                            resolve('Cannot happen');
+                        }
+                    });
+                });
+            });
+        }
+    }
+
+    function logFolds(folds) {
+        logger.fatal('FOLDS: ' + folds.length);
+        //for (let i = 0; i < folds.length; i++) {
+        //    logger.fatal(toHexString(folds[i].left));
+        //    logger.fatal(toHexString(folds[i].right));
+        //}
+    }
+
+    function evaluateMerkleTree(cChunks, idxChunk, chunkHash, cibHashes, fibHashArray) {
+        if (cChunks === 1) {
+            return new Promise(function (resolve, reject) {
+                if (chunkHash !== null) {
+                    resolve({ hash: chunkHash, expectedHash: fibHashArray[0] });
+                } else {
+                    reject(new Error('chunkHash is null'));
+                }
+            });
+        }
+        let cFibHashes = fibHashArray.length;
+        let treeDepth = computeDepth(cChunks);
+        let fibDepth = computeDepth(cFibHashes);
+        let idxStart = computeRowStartIdxFromDepthOfRow(treeDepth) + idxChunk;
+        let idxMin = computeRowStartIdxFromDepthOfRow(fibDepth + 1);
+
+        let folds = [];
+        let ibCIBHashes = 0;
+
+        let idxNextPeer = 0;
+        for (idxNextPeer = computePeerIdx(idxStart);
+            idxNextPeer >= idxMin;
+            idxNextPeer = computePeerIdx(idxNextPeer)) {
+
+            if (doesNodeExist(cChunks, treeDepth, idxNextPeer)) {
+                let left = null;
+                let right = null;
+                if ((idxNextPeer & 1) === 1) {
+                    left = cibHashes.slice(ibCIBHashes, ibCIBHashes + 32);
+                    if (folds.length === 0) {
+                        right = chunkHash;
+                    }
+                }
+                else {
+                    if (folds.length === 0) {
+                        left = chunkHash;
+                    }
+                    right = cibHashes.slice(ibCIBHashes, ibCIBHashes + 32);
+                }
+                ibCIBHashes += 32;
+                folds.push({ left: left, right: right });
+            }
+
+            idxNextPeer = computeParentIdx(idxNextPeer);
+            if (idxNextPeer === 0) {
+                break;
+            }
+        }
+
+        let idxFibHashes = 0;
+        if (idxNextPeer > 0) {
+            idxFibHashes = computePeerIdx(idxNextPeer);
+            idxMin = computeRowStartIdxFromDepthOfRow(fibDepth);
+            if (idxFibHashes < idxMin) {
+                return new Promise(function (resolve, reject) {
+                    if (idxFibHashes < idxMin) {
+                        reject(new Error('unable to derive hash'));
+                    } else {
+                        resolve('Cannot happen');
+                    }
+                });
+            }
+            idxFibHashes -= idxMin;
+        }
+
+        if (idxFibHashes >= cFibHashes) {
+            return new Promise(function (resolve, reject) {
+                if (idxFibHashes >= cFibHashes) {
+                    reject(new Error('authenticator hash list is too short'));
+                } else {
+                    resolve('Cannot happen');
+                }
+            });
+        }
+
+        //logger.fatal('ChunkHash: ' + toHexString(chunkHash));
+        //logger.fatal('FIBHash: ' + toHexString(fibHashArray[idxFibHashes]));
+        let result = foldHashes(folds, fibHashArray[idxFibHashes]);
+        logger.fatal('foldHashes is done');
+        return result;
+    }
+
+    function verifyAmpHash(data) {
         const isoFile = parse(data);
 
         if (!isoFile) {
             return;
         }
 
+        if (done) {
+            return;
+        }
+        done = true;
+
         const emsgs = isoFile.getBoxes('emsg');
 
         if (!emsgs) {
-            logger.fatal('findAmpHashData error: no emsgs');
+            logger.fatal('verifyAmpHash error: no emsgs');
             return;
         }
 
@@ -450,7 +715,7 @@ function BoxParser(/*config*/) {
         }
 
         if (!emsg) {
-            logger.fatal('findAmpHashData error: no emsg with AMP chunk urn');
+            logger.fatal('verifyAmpHash error: no emsg with AMP chunk urn');
             return;
         }
 
@@ -462,8 +727,9 @@ function BoxParser(/*config*/) {
         let hash_location = dataView.getUint16(12);
         let hash_size = dataView.getUint8(14);
         let hash_count = dataView.getUint8(15);
+        let cibHashes = new Uint8Array(message_data.slice(16));
 
-        logger.fatal('findAmpHashData - hash found' +
+        logger.fatal('verifyAmpHash - hash found' +
             ' ' + moov_id +
             ' ' + track_id +
             ' ' + sequence_number +
@@ -472,16 +738,122 @@ function BoxParser(/*config*/) {
             ' ' + hash_count
         );
 
-        let hashes = new Uint8Array(message_data.slice(16));
-        if (hash_size !== 32) {
-            logger.fatal('findAmpHashData error: hash size is not 32');
-            return;
+        let authenticator = null;
+        for (let iAuth = 0; iAuth < verifiedAuthenticators.length; iAuth++) {
+            if (verifiedAuthenticators[iAuth].moovId === moov_id &&
+                verifiedAuthenticators[iAuth].streamId === track_id) {
+                authenticator = verifiedAuthenticators[iAuth];
+            }
         }
-        if (hashes.length !== hash_count * hash_size) {
-            logger.fatal('findAmpHashData error: chunk data has the wrong size ' + hashes.length + ' vs ' + (hash_count * hash_size));
+
+        if (authenticator === null) {
+            logger.fatal('verifyAmpHash error: No authenticator found for this chunk');
             return;
         }
 
+        let hashes = new Uint8Array(message_data.slice(16));
+        if (hash_size !== 32) {
+            logger.fatal('verifyAmpHash error: hash size is not 32');
+            return;
+        }
+        if (hashes.length !== hash_count * hash_size) {
+            logger.fatal('verifyAmpHash error: chunk data has the wrong size ' + hashes.length + ' vs ' + (hash_count * hash_size));
+            return;
+        }
+
+        let toHash = new Uint8Array();
+
+        let mdhdTimescale = 0;
+        if (authenticator.mdhdBox) {
+            mdhdTimescale = authenticator.mdhdBox.timescale;
+        }
+        toHash = appendDwordAsBE(toHash, mdhdTimescale);
+
+        if (mdhdTimescale === 0) {
+            let mvhdTimescale = authenticator.mvhdBox.timescale;
+            toHash = appendDwordAsBE(toHash, mvhdTimescale);
+        }
+
+        const trunBoxes = isoFile.getBoxes('trun');
+
+        toHash = appendDwordAsBE(toHash, trunBoxes.length);
+
+        for (let iTrun = 0; iTrun < trunBoxes.length; iTrun++) {
+            const trunBox = trunBoxes[iTrun];
+            toHash = appendDwordAsBE(toHash, trunBox.version);
+            toHash = appendDwordAsBE(toHash, trunBox.sample_count);
+            toHash = appendDwordAsBE(toHash, trunBox.flags);
+        }
+
+        const tfhdBox = isoFile.getBox('tfhd');
+        toHash = appendDwordAsBE(toHash, tfhdBox.flags);
+
+        if (authenticator.trexBox) {
+            toHash = appendDwordAsBE(toHash, authenticator.trexBox.default_sample_duration);
+        }
+
+        if ((tfhdBox.flags & 0x008) !== 0) {
+            toHash = appendDwordAsBE(toHash, tfhdBox.default_sample_duration);
+        }
+
+        const mdatBox = isoFile.getBox('mdat');
+
+        let mdatOffset = 0;
+        for (let iTrun = 0; iTrun < trunBoxes.length; iTrun++) {
+            const trunBox = trunBoxes[iTrun];
+
+            for (let iSample = 0; iSample < trunBox.samples.length; iSample++) {
+                const sample = trunBox.samples[iSample];
+                if ((trunBox.flags & 0x800) !== 0) {
+                    toHash = appendDwordAsBE(toHash, sample.sample_composition_time_offset);
+                }
+                if ((trunBox.flags & 0x100) !== 0) {
+                    toHash = appendDwordAsBE(toHash, sample.sample_duration);
+                }
+
+                let sampleSize = 0;
+                if ((trunBox.flags & 0x200) !== 0) {
+                    sampleSize = sample.sample_size;
+                } else if ((tfhdBox.flags & 0x002) !== 0) {
+                    sampleSize = tfhdBox.default_sample_size;
+                } else if (!authenticator.trexBox) {
+                    logger.fatal('verifyAmpHash error: trun and tfhd did not have sample size and trex box does not exist');
+                    return;
+                } else {
+                    sampleSize = authenticator.trexBox.default_sample_size;
+                }
+
+                let sliceStart = mdatBox.data.byteOffset + mdatOffset;
+                let sliceEnd = sliceStart + sampleSize;
+
+                let mdat_data = mdatBox.data.buffer.slice(sliceStart, sliceEnd);
+                let mdatData = new Uint8Array(mdat_data);
+
+                toHash = appendArray(toHash, mdatData);
+                mdatOffset += sampleSize;
+            }
+        }
+
+        //logger.fatal('TODO: toHash ' + toHash.length + ' ' + toHexString(toHash));
+
+        ShaPromise(toHash, null).then(function (shaPromiseResults) {
+            evaluateMerkleTree(authenticator.numChunks, hash_location, shaPromiseResults.hash, cibHashes, authenticator.merkleTreeDigests).then(function (finalComputedHashResult) {
+
+                logger.fatal('SWENKER #1');
+
+                logger.fatal('FINAL: ' + toHexString(finalComputedHashResult.hash) + '      ' + toHexString(finalComputedHashResult.expectedHash));
+                return;
+
+            }).catch(function (e) {
+                logger.fatal('verifyAmpHash error: unable to complete merkle tree with error ' + e);
+                return;
+            });
+        }).catch(function (e) {
+            logger.fatal('verifyAmpHash error: unable to SHA-256 with error ' + e);
+            return;
+        });
+
+        logger.fatal('SWENKER #2');
         return;
     }
 
@@ -492,7 +864,7 @@ function BoxParser(/*config*/) {
         getSamplesInfo: getSamplesInfo,
         findInitRange: findInitRange,
         ampVerifyManifest: ampVerifyManifest,
-        findAmpHashData: findAmpHashData
+        verifyAmpHash: verifyAmpHash
     };
 
     setup();
