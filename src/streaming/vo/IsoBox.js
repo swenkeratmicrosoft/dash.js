@@ -116,7 +116,7 @@ class IsoBox {
                 break;
             case 'trex':
                 this.default_sample_duration = boxData.default_sample_duration;
-                this.default_sample_duration = boxData.default_sample_size;
+                this.default_sample_size = boxData.default_sample_size;
                 break;
             case 'mdat':
                 this.data = boxData.data;

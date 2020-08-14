@@ -459,7 +459,7 @@ function BoxParser(/*config*/) {
                 //TODO: Verify cert chain manifest.publisherEvidence.pemEncodedCertificates[*]
                 logger.fatal('TODO: ampVerifyManifest error: valid certificate chain could not be established');
 
-                logger.fatal('manifest is ' + JSON.stringify(manifest));
+                //logger.fatal('TODO: REMOVE: manifest is ' + JSON.stringify(manifest));
                 verifiedManifests.push(msgdata);
 
                 let trexBox = isoFile.getBox('trex');
@@ -481,7 +481,8 @@ function BoxParser(/*config*/) {
         });
     }
 
-    function appendDwordAsBE(arr, dwordToPush) {
+    function appendDwordAsBE(arr, dwordToPush, dworToPushSource) {
+        logger.fatal('TODO: REMOVE: Appending ' + dworToPushSource + '=' + dwordToPush);
         let result = new Uint8Array(arr.length + 4);
         result.set(arr);
 
@@ -546,12 +547,12 @@ function BoxParser(/*config*/) {
             let toHash = new Uint8Array(64);
             toHash.set(left);
             toHash.set(right, left.length);
-            logger.fatal('Folded a hash, both left and right');
+            logger.fatal('TODO: REMOVE: Folding:  ' + toHexString(left) + '    ' + toHexString(right));
             return ShaPromise(toHash, fibHash);
         } else {
             return new Promise(function (resolve, reject) {
                 if (left !== null) {
-                    logger.fatal('Folded a hash, left only');
+                    logger.fatal('TODO: REMOVE: Folding left only: ', toHexString(left));
                     resolve({ hash: left, expectedHash: fibHash});
                 } else {
                     reject(new Error('left hash is null'));
@@ -561,49 +562,25 @@ function BoxParser(/*config*/) {
     }
 
     function foldHashes(folds, fibHash) {
-        logFolds(folds);
         if (folds.length === 1) {
-            logger.fatal('Finished with foldHashes');
             return foldHash(folds[0].left, folds[0].right, fibHash);
         } else {
-            return new Promise(function (resolve, reject) {
-                foldHash(folds[0].left, folds[0].right, fibHash).then(function (nextHash) {
+            return foldHash(folds[0].left, folds[0].right, fibHash).then(function (nextHash) {
+                folds = folds.slice(1);
 
-                    folds = folds.slice(1);
-
-                    if (folds[0].left === null) {
-                        folds[0].left = nextHash.hash;
-                    } else {
-                        if (folds[0].right !== null) {
-                            reject(new Error('unexpected hash present in foldHashes'));
-                        }
-                        folds[0].right = nextHash.hash;
+                if (folds[0].left === null) {
+                    folds[0].left = nextHash.hash;
+                } else {
+                    if (folds[0].right !== null) {
+                        throw new Error('unexpected hash present in foldHashes');
                     }
+                    folds[0].right = nextHash.hash;
+                }
 
-                    let result = foldHashes(folds, fibHash);
-                    logger.fatal('Recursed out of foldHashes');
-                    return result;
-
-                }).catch(function (e) {
-
-                    return new Promise(function (resolve, reject) {
-                        if (e !== null) {
-                            reject(e);
-                        } else {
-                            resolve('Cannot happen');
-                        }
-                    });
-                });
+                let result = foldHashes(folds, fibHash);
+                return result;
             });
         }
-    }
-
-    function logFolds(folds) {
-        logger.fatal('FOLDS: ' + folds.length);
-        //for (let i = 0; i < folds.length; i++) {
-        //    logger.fatal(toHexString(folds[i].left));
-        //    logger.fatal(toHexString(folds[i].right));
-        //}
     }
 
     function evaluateMerkleTree(cChunks, idxChunk, chunkHash, cibHashes, fibHashArray) {
@@ -681,10 +658,9 @@ function BoxParser(/*config*/) {
             });
         }
 
-        //logger.fatal('ChunkHash: ' + toHexString(chunkHash));
-        //logger.fatal('FIBHash: ' + toHexString(fibHashArray[idxFibHashes]));
+        //logger.fatal('TODO: REMOVE: ChunkHash: ' + toHexString(chunkHash));
+        //logger.fatal('TODO: REMOVE: FIBHash: ' + toHexString(fibHashArray[idxFibHashes]));
         let result = foldHashes(folds, fibHashArray[idxFibHashes]);
-        logger.fatal('foldHashes is done');
         return result;
     }
 
@@ -694,11 +670,6 @@ function BoxParser(/*config*/) {
         if (!isoFile) {
             return;
         }
-
-        if (done) {
-            return;
-        }
-        done = true;
 
         const emsgs = isoFile.getBoxes('emsg');
 
@@ -729,14 +700,13 @@ function BoxParser(/*config*/) {
         let hash_count = dataView.getUint8(15);
         let cibHashes = new Uint8Array(message_data.slice(16));
 
-        logger.fatal('verifyAmpHash - hash found' +
-            ' ' + moov_id +
-            ' ' + track_id +
-            ' ' + sequence_number +
-            ' ' + hash_location +
-            ' ' + hash_size +
-            ' ' + hash_count
-        );
+        //TODO: Delete refrences to 'done'
+        if (done) {
+            return;
+        }
+        if (moov_id === 2) {
+            done = true;
+        }
 
         let authenticator = null;
         for (let iAuth = 0; iAuth < verifiedAuthenticators.length; iAuth++) {
@@ -767,33 +737,33 @@ function BoxParser(/*config*/) {
         if (authenticator.mdhdBox) {
             mdhdTimescale = authenticator.mdhdBox.timescale;
         }
-        toHash = appendDwordAsBE(toHash, mdhdTimescale);
+        toHash = appendDwordAsBE(toHash, mdhdTimescale, 'mdhdTimescale');
 
         if (mdhdTimescale === 0) {
             let mvhdTimescale = authenticator.mvhdBox.timescale;
-            toHash = appendDwordAsBE(toHash, mvhdTimescale);
+            toHash = appendDwordAsBE(toHash, mvhdTimescale, 'mvhdTimescale');
         }
 
         const trunBoxes = isoFile.getBoxes('trun');
 
-        toHash = appendDwordAsBE(toHash, trunBoxes.length);
+        toHash = appendDwordAsBE(toHash, trunBoxes.length, 'trunBoxes.length');
 
         for (let iTrun = 0; iTrun < trunBoxes.length; iTrun++) {
             const trunBox = trunBoxes[iTrun];
-            toHash = appendDwordAsBE(toHash, trunBox.version);
-            toHash = appendDwordAsBE(toHash, trunBox.sample_count);
-            toHash = appendDwordAsBE(toHash, trunBox.flags);
+            toHash = appendDwordAsBE(toHash, trunBox.version, 'trunBox.version');
+            toHash = appendDwordAsBE(toHash, trunBox.sample_count, 'trunBox.sample_count');
+            toHash = appendDwordAsBE(toHash, trunBox.flags, 'trunBox.flags');
         }
 
         const tfhdBox = isoFile.getBox('tfhd');
-        toHash = appendDwordAsBE(toHash, tfhdBox.flags);
+        toHash = appendDwordAsBE(toHash, tfhdBox.flags, 'tfhdBox.flags');
 
         if (authenticator.trexBox) {
-            toHash = appendDwordAsBE(toHash, authenticator.trexBox.default_sample_duration);
+            toHash = appendDwordAsBE(toHash, authenticator.trexBox.default_sample_duration, 'authenticator.trexBox.default_sample_duration');
         }
 
         if ((tfhdBox.flags & 0x008) !== 0) {
-            toHash = appendDwordAsBE(toHash, tfhdBox.default_sample_duration);
+            toHash = appendDwordAsBE(toHash, tfhdBox.default_sample_duration, 'tfhdBox.default_sample_duration');
         }
 
         const mdatBox = isoFile.getBox('mdat');
@@ -805,10 +775,10 @@ function BoxParser(/*config*/) {
             for (let iSample = 0; iSample < trunBox.samples.length; iSample++) {
                 const sample = trunBox.samples[iSample];
                 if ((trunBox.flags & 0x800) !== 0) {
-                    toHash = appendDwordAsBE(toHash, sample.sample_composition_time_offset);
+                    toHash = appendDwordAsBE(toHash, sample.sample_composition_time_offset, 'sample.sample_composition_time_offset');
                 }
                 if ((trunBox.flags & 0x100) !== 0) {
-                    toHash = appendDwordAsBE(toHash, sample.sample_duration);
+                    toHash = appendDwordAsBE(toHash, sample.sample_duration, 'sample.sample_duration');
                 }
 
                 let sampleSize = 0;
@@ -834,14 +804,17 @@ function BoxParser(/*config*/) {
             }
         }
 
-        //logger.fatal('TODO: toHash ' + toHash.length + ' ' + toHexString(toHash));
-
         ShaPromise(toHash, null).then(function (shaPromiseResults) {
             evaluateMerkleTree(authenticator.numChunks, hash_location, shaPromiseResults.hash, cibHashes, authenticator.merkleTreeDigests).then(function (finalComputedHashResult) {
+                if (!compare(finalComputedHashResult.hash, finalComputedHashResult.expectedHash)) {
+                    logger.fatal('verifyAmpHash error: incorrect SHA256( chunk ) for ' +
+                        '  moov_id=' + moov_id +
+                        ', track_id=' + track_id +
+                        ', sequence_number=' + sequence_number +
+                        ', hash_location=' + hash_location);
+                    return;
+                }
 
-                logger.fatal('SWENKER #1');
-
-                logger.fatal('FINAL: ' + toHexString(finalComputedHashResult.hash) + '      ' + toHexString(finalComputedHashResult.expectedHash));
                 return;
 
             }).catch(function (e) {
@@ -853,7 +826,6 @@ function BoxParser(/*config*/) {
             return;
         });
 
-        logger.fatal('SWENKER #2');
         return;
     }
 
