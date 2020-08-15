@@ -43,7 +43,7 @@ function BoxParser(/*config*/) {
     let context = this.context;
     let verifiedManifests = [];
     let verifiedAuthenticators = [];
-    let done = false;
+    //let TODOdone = false;
 
     function setup() {
         logger = Debug(context).getInstance().getLogger(instance);
@@ -277,16 +277,16 @@ function BoxParser(/*config*/) {
         });
     }
 
-    function toHexString(byteArray) {
-        if (byteArray === null) {
-            return 'null';
-        }
-        let s = '';
-        byteArray.forEach(function (byte) {
-            s += '0x' + ('0' + (byte & 0xFF).toString(16)).slice(-2) + ', ';
-        });
-        return s;
-    }
+    //function toHexString(byteArray) {
+    //    if (byteArray === null) {
+    //        return 'null';
+    //    }
+    //    let s = '';
+    //    byteArray.forEach(function (byte) {
+    //        s += '0x' + ('0' + (byte & 0xFF).toString(16)).slice(-2) + ', ';
+    //    });
+    //    return s;
+    //}
 
     function ampVerifyManifest(data) {
         const isoFile = parse(data);
@@ -296,6 +296,9 @@ function BoxParser(/*config*/) {
         }
 
         const emsgs = isoFile.getBoxes('emsg');
+        let trexBox = isoFile.getBox('trex');
+        let mdhdBox = isoFile.getBox('mdhd');
+        let mvhdBox = isoFile.getBox('mvhd');
 
         if (!emsgs) {
             logger.fatal('ampVerifyManifest error: no emsgs');
@@ -314,6 +317,8 @@ function BoxParser(/*config*/) {
             return;
         }
 
+        //logger.fatal('TODO: REMOVE: Found emsg with id: ' + emsg.id);
+
         let message_data = emsg.message_data.buffer.slice(emsg.message_data.byteOffset, emsg.message_data.byteOffset + emsg.message_data.byteLength);
         let msgdata = new Uint8Array(message_data);
 
@@ -328,6 +333,14 @@ function BoxParser(/*config*/) {
 
         if (verified) {
             logger.fatal('ampVerifyManifest: This manifest was already verified.');
+            for (let i = 0; i < verifiedAuthenticators.length; i++) {
+                //logger.fatal('TODO: REMOVE: Comparing auth.moovid with emsg.id ' + verifiedAuthenticators[i].moovId + ' vs ' + emsg.id);
+                if (verifiedAuthenticators[i].moovId === emsg.id) {
+                    verifiedAuthenticators[i].trexBox = trexBox;
+                    verifiedAuthenticators[i].mdhdBox = mdhdBox;
+                    verifiedAuthenticators[i].mvhdBox = mvhdBox;
+                }
+            }
             return;
         }
 
@@ -460,16 +473,38 @@ function BoxParser(/*config*/) {
                 logger.fatal('TODO: ampVerifyManifest error: valid certificate chain could not be established');
 
                 //logger.fatal('TODO: REMOVE: manifest is ' + JSON.stringify(manifest));
-                verifiedManifests.push(msgdata);
 
-                let trexBox = isoFile.getBox('trex');
-                let mdhdBox = isoFile.getBox('mdhd');
-                let mvhdBox = isoFile.getBox('mvhd');
-                for (let i = 0; i < authenticators.length; i++) {
-                    authenticators[i].trexBox = trexBox;
-                    authenticators[i].mdhdBox = mdhdBox;
-                    authenticators[i].mvhdBox = mvhdBox;
-                    verifiedAuthenticators.push(authenticators[i]);
+                for (let iVerified = 0; iVerified < verifiedManifests.length && !verified; iVerified++) {
+                    let jsonStrNext = JSON.stringify(verifiedManifests[iVerified]);
+                    if (jsonStr.localeCompare(jsonStrNext) === 0) {
+                        verified = true;
+                    }
+                }
+
+                if (verified) {
+                    logger.fatal('TODO: Race-condition: Manifest verified twice');
+
+                    for (let i = 0; i < verifiedAuthenticators.length; i++) {
+                        //logger.fatal('TODO: REMOVE: Comparing auth.moovid with emsg.id ' + verifiedAuthenticators[i].moovId + ' vs ' + emsg.id);
+                        if (verifiedAuthenticators[i].moovId === emsg.id) {
+                            verifiedAuthenticators[i].trexBox = trexBox;
+                            verifiedAuthenticators[i].mdhdBox = mdhdBox;
+                            verifiedAuthenticators[i].mvhdBox = mvhdBox;
+                        }
+                    }
+
+                } else {
+                    verifiedManifests.push(msgdata);
+
+                    for (let i = 0; i < authenticators.length; i++) {
+                        //logger.fatal('TODO: REMOVE: Comparing auth.moovid with emsg.id ' + authenticators[i].moovId + ' vs ' + emsg.id);
+                        if (authenticators[i].moovId === emsg.id) {
+                            authenticators[i].trexBox = trexBox;
+                            authenticators[i].mdhdBox = mdhdBox;
+                            authenticators[i].mvhdBox = mvhdBox;
+                        }
+                        verifiedAuthenticators.push(authenticators[i]);
+                    }
                 }
             }).catch(function (e) {
                 logger.fatal('ampVerifyManifest error: unable to SHA-256 with error ' + e);
@@ -481,8 +516,8 @@ function BoxParser(/*config*/) {
         });
     }
 
-    function appendDwordAsBE(arr, dwordToPush, dworToPushSource) {
-        logger.fatal('TODO: REMOVE: Appending ' + dworToPushSource + '=' + dwordToPush);
+    function appendDwordAsBE(arr, dwordToPush/*, dwordToPushSource*/) {
+        //logger.fatal('TODO: REMOVE: Appending ' + dwordToPushSource + '=' + dwordToPush);
         let result = new Uint8Array(arr.length + 4);
         result.set(arr);
 
@@ -547,12 +582,12 @@ function BoxParser(/*config*/) {
             let toHash = new Uint8Array(64);
             toHash.set(left);
             toHash.set(right, left.length);
-            logger.fatal('TODO: REMOVE: Folding:  ' + toHexString(left) + '    ' + toHexString(right));
+            //logger.fatal('TODO: REMOVE: Folding:  ' + toHexString(left) + '    ' + toHexString(right));
             return ShaPromise(toHash, fibHash);
         } else {
             return new Promise(function (resolve, reject) {
                 if (left !== null) {
-                    logger.fatal('TODO: REMOVE: Folding left only: ', toHexString(left));
+                    //logger.fatal('TODO: REMOVE: Folding left only: ', toHexString(left));
                     resolve({ hash: left, expectedHash: fibHash});
                 } else {
                     reject(new Error('left hash is null'));
@@ -690,6 +725,8 @@ function BoxParser(/*config*/) {
             return;
         }
 
+        //logger.fatal('TODO: REMOVE: Found emsg with id: ' + emsg.id);
+
         let message_data = emsg.message_data.buffer.slice(emsg.message_data.byteOffset, emsg.message_data.byteOffset + emsg.message_data.byteLength);
         let dataView = new DataView(message_data);
         let moov_id = dataView.getUint32(0);
@@ -700,13 +737,12 @@ function BoxParser(/*config*/) {
         let hash_count = dataView.getUint8(15);
         let cibHashes = new Uint8Array(message_data.slice(16));
 
-        //TODO: Delete refrences to 'done'
-        if (done) {
-            return;
-        }
-        if (moov_id === 2) {
-            done = true;
-        }
+        //if (TODOdone) {
+        //    return;
+        //}
+        //if (moov_id === 2) {
+        //    TODOdone = true;
+        //}
 
         let authenticator = null;
         for (let iAuth = 0; iAuth < verifiedAuthenticators.length; iAuth++) {
@@ -813,6 +849,12 @@ function BoxParser(/*config*/) {
                         ', sequence_number=' + sequence_number +
                         ', hash_location=' + hash_location);
                     return;
+                } else {
+                    logger.fatal('verifyAmpHash: Successfully verified chunk: ' +
+                        '  moov_id=' + moov_id +
+                        ', track_id=' + track_id +
+                        ', sequence_number=' + sequence_number +
+                        ', hash_location=' + hash_location);
                 }
 
                 return;
