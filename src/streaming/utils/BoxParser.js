@@ -332,6 +332,7 @@ function BoxParser(/*config*/) {
         }).catch(function (e) {
             pendingManifestEmsg = null;
             logger.fatal('ampVerifyManifest error: ' + e);
+            return;
         });
     }
 
@@ -410,7 +411,7 @@ function BoxParser(/*config*/) {
                     return reject(new Error('No ISO Box Authenticator found for record ' + iRecord));
                 }
                 if (authenticator.numChunks === 0) {
-                    return reject(Error('Invalid authenticator (zero chunk count) in record ' + iRecord));
+                    return reject(new Error('Invalid authenticator (zero chunk count) in record ' + iRecord));
                 }
                 authenticators.push(authenticator);
 
@@ -667,8 +668,7 @@ function BoxParser(/*config*/) {
                     folds[0].right = nextHash.hash;
                 }
 
-                let result = foldHashes(folds, fibHash);
-                return result;
+                return foldHashes(folds, fibHash);
             });
         }
     }
@@ -746,7 +746,7 @@ function BoxParser(/*config*/) {
         return foldHashes(folds, fibHashArray[idxFibHashes]);
     }
 
-    function verifyAmpHash(data) {
+    function ampVerifyHash(data) {
         const isoFile = parse(data);
 
         if (!isoFile) {
@@ -756,7 +756,7 @@ function BoxParser(/*config*/) {
         const emsgs = isoFile.getBoxes('emsg');
 
         if (!emsgs) {
-            logger.fatal('verifyAmpHash error: no emsgs');
+            logger.fatal('ampVerifyHash error: no emsgs');
             return;
         }
 
@@ -768,21 +768,21 @@ function BoxParser(/*config*/) {
         }
 
         if (!emsg) {
-            logger.fatal('verifyAmpHash error: no emsg with AMP chunk urn');
+            logger.fatal('ampVerifyHash error: no emsg with AMP chunk urn');
             return;
         }
 
-        verifyAmpHashMsg(0, isoFile, emsg).then(function (chunkStr) {
+        ampVerifyHashMsg(0, isoFile, emsg).then(function (chunkStr) {
             //TODO: Update UI appropriately instead of just logging to browser console
-            logger.fatal('verifyAmpHash: Successfully verified chunk: ' + chunkStr);
+            logger.fatal('ampVerifyHash: Successfully verified chunk: ' + chunkStr);
             return;
         }).catch(function (e) {
             //TODO: Update UI appropriately instead of just logging to browser console
-            logger.fatal('verifyAmpHash error: Unable to verify chunk with error: ' + e);
+            logger.fatal('ampVerifyHash error: Unable to verify chunk with error: ' + e);
         });
     }
 
-    function verifyAmpHashMsg(attempts, isoFile, emsg) {
+    function ampVerifyHashMsg(attempts, isoFile, emsg) {
 
         let message_data = emsg.message_data.buffer.slice(emsg.message_data.byteOffset, emsg.message_data.byteOffset + emsg.message_data.byteLength);
         let dataView = new DataView(message_data);
@@ -811,7 +811,7 @@ function BoxParser(/*config*/) {
             return new Promise(function (resolve, reject) {
                 if (attempts < 100) {
                     // Assume manifest is still verifying and try again for up to 1 second total (100 * 10 ms)
-                    setTimeout(function () { verifyAmpHashMsg(attempts + 1, isoFile, emsg); return resolve(chunkStr); }, 10);
+                    setTimeout(function () { ampVerifyHashMsg(attempts + 1, isoFile, emsg); return resolve(chunkStr); }, 10);
                 } else {
                     return reject(new Error('No authenticator found for this chunk'));
                 }
@@ -923,7 +923,7 @@ function BoxParser(/*config*/) {
         getSamplesInfo: getSamplesInfo,
         findInitRange: findInitRange,
         ampVerifyManifest: ampVerifyManifest,
-        verifyAmpHash: verifyAmpHash
+        ampVerifyHash: ampVerifyHash
     };
 
     setup();
