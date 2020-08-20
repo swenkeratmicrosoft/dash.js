@@ -32,6 +32,8 @@
 import Debug from '../../core/Debug';
 import IsoFile from './IsoFile';
 import FactoryMaker from '../../core/FactoryMaker';
+import EventBus from '../../core/EventBus';
+import Events from '../../core/events/Events';
 import ISOBoxer from 'codem-isoboxer';
 
 import IsoBoxSearchInfo from '../vo/IsoBoxSearchInfo';
@@ -41,6 +43,7 @@ function BoxParser(/*config*/) {
     let logger,
         instance;
     let context = this.context;
+    const eventBus = EventBus(context).getInstance();
     let pendingManifestEmsg = null;
     let verifiedManifests = [];
     let verifiedAuthenticators = [];
@@ -299,65 +302,99 @@ function BoxParser(/*config*/) {
         return certificate;
     }
 
+    function ampOnInitFragmentLoaded(data) {
+        ampVerifyManifest(data).then(function (manifest) {
+            if (manifest !== null) {
+                eventBus.trigger(Events.AMP_MANIFEST_FOUND,
+                    { sender: this, manifest: manifest, error: null });
+            }
+        }).catch(function (e) {
+            eventBus.trigger(Events.AMP_MANIFEST_FOUND,
+                { sender: this, error: e });
+        });
+    }
+
+    function ampOnMediaFragmentLoaded(data) {
+        ampVerifyHash(data).then(function (chunkStr) {
+            if (chunkStr !== null) {
+                eventBus.trigger(Events.AMP_STATE_CHANGED,
+                    { sender: this, isVerified: true, chunkStr: chunkStr, error: null});
+            }
+        }).catch(function (e) {
+            eventBus.trigger(Events.AMP_STATE_CHANGED,
+                { sender: this, error: e });
+        });
+    }
+
     function ampVerifyManifest(data) {
 
-        const isoFile = parse(data);
+        return new Promise(function (resolve, reject) {
+            const isoFile = parse(data);
 
-        if (!isoFile) {
-            return;
-        }
-
-        const emsgs = isoFile.getBoxes('emsg');
-
-        if (!emsgs) {
-            logger.fatal('ampVerifyManifest error: no emsgs');
-            return;
-        }
-
-        let emsg = null;
-        for (let i = 0, ln = emsgs.length; i < ln; i++) {
-            if (emsgs[i].scheme_id_uri === 'urn:mpeg:amp:manifest:emsg') {
-                emsg = emsgs[i];
+            if (!isoFile) {
+                return resolve(null);
             }
-        }
 
-        if (!emsg) {
-            logger.fatal('ampVerifyManifest error: no emsg with AMP manifest urn');
-            return;
-        }
+            const emsgs = isoFile.getBoxes('emsg');
 
-        ampVerifyManifestMsg(0, isoFile, emsg).then(function () {
-            pendingManifestEmsg = null;
-            return;
-        }).catch(function (e) {
-            pendingManifestEmsg = null;
-            logger.fatal('ampVerifyManifest error: ' + e);
-            return;
+            if (!emsgs) {
+                return resolve(null);
+            }
+
+            let emsg = null;
+            for (let i = 0, ln = emsgs.length; i < ln; i++) {
+                if (emsgs[i].scheme_id_uri === 'urn:mpeg:amp:manifest:emsg') {
+                    emsg = emsgs[i];
+                }
+            }
+
+            if (!emsg) {
+                return resolve(null);
+            }
+
+            ampVerifyManifestMsg(0, isoFile, emsg).then(function (manifest) {
+                pendingManifestEmsg = null;
+                return resolve(manifest);
+            }).catch(function (e) {
+                pendingManifestEmsg = null;
+                return reject(new Error('ampVerifyManifest error: ' + e));
+            });
         });
     }
 
     function ampVerifyManifestMsg(attempts, isoFile, emsg) {
 
-        if (pendingManifestEmsg !== null) {
-            return new Promise(function (resolve, reject) {
+        let pending = true;
+        if (pendingManifestEmsg === null) {
+            pendingManifestEmsg = emsg;
+            pending = false;
+        }
+
+        return new Promise(function (resolve, reject) {
+
+            let message_data = emsg.message_data.buffer.slice(emsg.message_data.byteOffset, emsg.message_data.byteOffset + emsg.message_data.byteLength);
+            let msgdata = new Uint8Array(message_data);
+
+            let CBOR = require('cbor-js');
+            let manifest = CBOR.decode(message_data);
+
+            if (pending) {
                 if (attempts < 100) {
-                    setTimeout(function () { ampVerifyManifestMsg(attempts + 1, isoFile, emsg); return resolve(); }, 10);
+                    setTimeout(function () {
+                        return ampVerifyManifestMsg(attempts + 1, isoFile, emsg).then(function (manifest) {
+                            return resolve(manifest);
+                        }).catch(function (e) {
+                            return reject(e);
+                        });
+                    }, 10);
                 } else {
                     return reject(new Error('Pending manifest never completed verification'));
                 }
-            });
-        }
-
-        pendingManifestEmsg = emsg;
-
-        return new Promise(function (resolve, reject) {
+            }
 
             let trexBox = isoFile.getBox('trex');
             let mdhdBox = isoFile.getBox('mdhd');
             let mvhdBox = isoFile.getBox('mvhd');
-
-            let message_data = emsg.message_data.buffer.slice(emsg.message_data.byteOffset, emsg.message_data.byteOffset + emsg.message_data.byteLength);
-            let msgdata = new Uint8Array(message_data);
 
             let verified = false;
             let jsonStr = JSON.stringify(msgdata);
@@ -377,11 +414,8 @@ function BoxParser(/*config*/) {
                     }
                 }
                 pendingManifestEmsg = null;
-                return resolve();
+                return resolve(null);
             }
-
-            let CBOR = require('cbor-js');
-            let manifest = CBOR.decode(message_data);
 
             // Verifying a Manifest Algorithm Step 1. Fail unless the following versions are all === 1
             if (manifest.version !== 1 ||
@@ -555,7 +589,11 @@ function BoxParser(/*config*/) {
                                     }
 
                                     pendingManifestEmsg = null;
-                                    return resolve();
+                                    if (verified) {
+                                        return resolve(null);
+                                    } else {
+                                        return resolve(manifest);
+                                    }
 
                                 }).catch(function (e) {
                                     return reject(new Error('Unable to verify certificate chain with error: ' + e));
@@ -747,38 +785,37 @@ function BoxParser(/*config*/) {
     }
 
     function ampVerifyHash(data) {
-        const isoFile = parse(data);
 
-        if (!isoFile) {
-            return;
-        }
+        return new Promise(function (resolve, reject) {
 
-        const emsgs = isoFile.getBoxes('emsg');
+            const isoFile = parse(data);
 
-        if (!emsgs) {
-            logger.fatal('ampVerifyHash error: no emsgs');
-            return;
-        }
-
-        let emsg = null;
-        for (let i = 0, ln = emsgs.length; i < ln; i++) {
-            if (emsgs[i].scheme_id_uri === 'urn:mpeg:amp:chunk:emsg') {
-                emsg = emsgs[i];
+            if (!isoFile) {
+                return resolve(null);
             }
-        }
 
-        if (!emsg) {
-            logger.fatal('ampVerifyHash error: no emsg with AMP chunk urn');
-            return;
-        }
+            const emsgs = isoFile.getBoxes('emsg');
 
-        ampVerifyHashMsg(0, isoFile, emsg).then(function (chunkStr) {
-            //TODO: Update UI appropriately instead of just logging to browser console
-            logger.fatal('ampVerifyHash: Successfully verified chunk: ' + chunkStr);
-            return;
-        }).catch(function (e) {
-            //TODO: Update UI appropriately instead of just logging to browser console
-            logger.fatal('ampVerifyHash error: Unable to verify chunk with error: ' + e);
+            if (!emsgs) {
+                return resolve(null);
+            }
+
+            let emsg = null;
+            for (let i = 0, ln = emsgs.length; i < ln; i++) {
+                if (emsgs[i].scheme_id_uri === 'urn:mpeg:amp:chunk:emsg') {
+                    emsg = emsgs[i];
+                }
+            }
+
+            if (!emsg) {
+                return resolve(null);
+            }
+
+            ampVerifyHashMsg(0, isoFile, emsg).then(function (chunkStr) {
+                return resolve(chunkStr);
+            }).catch(function (e) {
+                return reject(new Error('ampVerifyHash error: Unable to verify chunk with error: ' + e));
+            });
         });
     }
 
@@ -902,7 +939,6 @@ function BoxParser(/*config*/) {
             ShaPromise(toHash, null).then(function (shaPromiseResults) {
                 evaluateMerkleTree(authenticator.numChunks, hash_location, shaPromiseResults.hash, cibHashes, authenticator.merkleTreeDigests).then(function (finalComputedHashResult) {
                     if (!compare(finalComputedHashResult.hash, finalComputedHashResult.expectedHash)) {
-                        //TODO: Update UI appropriately instead of just logging to browser console
                         return reject(new Error('Incorrect SHA256( chunk )'));
                     } else {
                         return resolve(chunkStr);
@@ -922,8 +958,8 @@ function BoxParser(/*config*/) {
         getMediaTimescaleFromMoov: getMediaTimescaleFromMoov,
         getSamplesInfo: getSamplesInfo,
         findInitRange: findInitRange,
-        ampVerifyManifest: ampVerifyManifest,
-        ampVerifyHash: ampVerifyHash
+        ampOnInitFragmentLoaded: ampOnInitFragmentLoaded,
+        ampOnMediaFragmentLoaded: ampOnMediaFragmentLoaded
     };
 
     setup();
