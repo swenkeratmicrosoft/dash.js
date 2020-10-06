@@ -520,6 +520,45 @@ function BoxParser(/*config*/) {
                     let leafCertPEM = manifest.publisherEvidence.pemEncodedCertificates[0];
                     let leafCert = PEMToCert(leafCertPEM);
 
+                    //
+                    // Note: These are the key usages for the current TEST leaf certificates being used which are simply standard SSL certs.
+                    //       One or both of these values are expected to change once the certificate key usages become standardized.
+                    //
+                    let requiredKU = 0x80;
+                    let requiredEKU1 = '1.3.6.1.5.5.7.3.3';
+                    let requiredEKU2 = '1.3.6.1.5.5.7.3.2';
+
+                    let KUOK = false;
+                    let EKUOK = false;
+                    for (var iExt = 0; iExt < leafCert.extensions.length; iExt++) {
+                        if (leafCert.extensions[iExt].extnID === '2.5.29.15') {
+                            let ku = new Uint8Array(leafCert.extensions[iExt].parsedValue.valueBlock.valueHex);
+                            if (ku.length >= 1 &&
+                                (ku[0] & requiredKU) === requiredKU) {
+                                KUOK = true;
+                            }
+                        }
+                        if (leafCert.extensions[iExt].extnID === '2.5.29.37') {
+                            let foundEKU1 = false;
+                            let foundEKU2 = false;
+                            for (var iEKU = 0; iEKU < leafCert.extensions[iExt].parsedValue.keyPurposes.length; iEKU++) {
+                                if (leafCert.extensions[iExt].parsedValue.keyPurposes[iEKU] === requiredEKU1) {
+                                    foundEKU1 = true;
+                                }
+                                if (leafCert.extensions[iExt].parsedValue.keyPurposes[iEKU] === requiredEKU2) {
+                                    foundEKU2 = true;
+                                }
+                            }
+                            EKUOK = foundEKU1 && foundEKU2;
+                        }
+                    }
+                    if (!KUOK) {
+                        return reject(new Error('Leaf certificate did not have required key usage of ' + requiredKU));
+                    }
+                    if (!EKUOK) {
+                        return reject(new Error('Leaf certificate did not have required extended key usages of ' + requiredEKU1 + ' and ' + requiredEKU2));
+                    }
+
                     leafCert.getPublicKey().then(function (leafCertPubkey) {
                         let algorithm = {
                             name: 'ECDSA',
